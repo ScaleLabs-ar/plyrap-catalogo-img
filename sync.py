@@ -224,9 +224,21 @@ def main():
         w.writeheader()
         w.writerows(filas)
 
+    # Portada: una tarjeta por foto unica (varias variantes comparten imagen).
+    vistas = {}
+    for f in filas:
+        vistas.setdefault(f["image_link"], f)
+    tarjetas = [{"img": os.path.basename(k), "t": v["title"],
+                 "p": v["price"].replace(" ARS", ""),
+                 "a": v["availability"] == "in stock", "u": v["link"]}
+                for k, v in vistas.items()]
+    tarjetas.sort(key=lambda x: (not x["a"], x["t"]))
+    json.dump(tarjetas, open(os.path.join(DIR, "catalogo.json"), "w"), ensure_ascii=False)
+
     agotados = sum(1 for f in filas if f["availability"] == "out of stock")
     print(f"-> feed_brandeado.csv: {len(filas)} variantes "
           f"({agotados} sin stock, {sin_marco} sin marco)")
+    print(f"-> catalogo.json: {len(tarjetas)} tarjetas para la portada")
 
 
 if __name__ == "__main__":
