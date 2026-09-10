@@ -13,7 +13,7 @@ Que hace, en orden:
 Es idempotente: una foto que ya se horneo no se vuelve a bajar ni a procesar,
 porque el nombre del archivo es el hash de su URL original.
 """
-import csv, hashlib, html, io, json, os, re, sys, urllib.request
+import csv, hashlib, html, io, json, os, random, re, sys, time, urllib.error, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image, ImageChops
 
@@ -31,10 +31,29 @@ LIENZO, TOP, BOT = 1080, 262, 840
 slug = lambda u: hashlib.sha1(u.encode()).hexdigest()[:16]
 
 
+# Tiendanube corta cuando le pegas fuerte: con 6 hilos, 277 de 355 paginas de
+# G4 volvieron con HTTPError aunque cada una servia bien de a una. Por eso
+# concurrencia baja y reintento con backoff.
+HILOS     = 3
+REINTENTOS = 4
+
+
 def bajar(url, binario=False):
-    d = urllib.request.urlopen(
-        urllib.request.Request(url, headers=UA), timeout=45).read()
-    return d if binario else d.decode("utf-8", "replace")
+    ultimo = None
+    for intento in range(REINTENTOS):
+        try:
+            d = urllib.request.urlopen(
+                urllib.request.Request(url, headers=UA), timeout=60).read()
+            return d if binario else d.decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            ultimo = e
+            if e.code == 404:
+                raise                      # no existe: no tiene sentido insistir
+        except Exception as e:
+            ultimo = e
+        # Espera creciente con jitter, para no re-sincronizar los hilos.
+        time.sleep((2 ** intento) + random.uniform(0, 1))
+    raise ultimo
 
 
 # ---------------------------------------------------------------- horneado ---
@@ -112,7 +131,8 @@ def leer_producto(url):
     try:
         h = bajar(url)
     except Exception as e:
-        print("  ERROR", type(e).__name__, url)
+        codigo = getattr(e, "code", "")
+        print(f"  ERROR {type(e).__name__} {codigo} {url}")
         return []
 
     def meta(prop):
@@ -173,14 +193,14 @@ def main():
     urls = sorted(set(re.findall(rf"{TIENDA}/productos/[a-z0-9\-]+/", bajar(f"{TIENDA}/sitemap.xml"))))
     print(f"productos en el sitemap: {len(urls)}")
 
-    filas = [f for g in ThreadPoolExecutor(6).map(leer_producto, urls) for f in g]
+    filas = [f for g in ThreadPoolExecutor(HILOS).map(leer_producto, urls) for f in g]
     if not filas:
         # Sin esto, un error transitorio de la tienda vacia el feed y Meta lo
         # levanta vacio a la hora siguiente: la campaña se cae sin aviso.
         sys.exit("ERROR: la tienda no devolvio productos — no se toca el feed.")
 
     fotos = sorted({f["foto"] for f in filas})
-    res = list(ThreadPoolExecutor(6).map(lambda u: hornear(u, marco), fotos))
+    res = list(ThreadPoolExecutor(HILOS).map(lambda u: hornear(u, marco), fotos))
     print(f"fotos: {len(fotos)} | generadas: {res.count('generada')} | "
           f"ya estaban: {res.count('ya estaba')} | errores: {res.count('error')}")
 
